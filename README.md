@@ -110,6 +110,8 @@ decoder state, parsed records, and runtime overhead also use memory.
 while parsing can continue. Physical lines are limited to 1,048,576 decoded characters,
 including their line ending. The standard-library CSV field-size limit also applies;
 exceeding it stops parsing with a diagnostic. Both CLI size/detail limits must be positive.
+On Python 3.10, the CSV parser also stops at NUL characters; they remain reported as
+control-character errors and the report explicitly marks parsing incomplete.
 A regular-file snapshot does not lock an actively changing source: inspect a stable
 export for reproducible results.
 

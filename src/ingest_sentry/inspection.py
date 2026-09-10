@@ -342,10 +342,15 @@ def _parse(stream: io.TextIOWrapper, state: _State) -> None:
                     reader.line_num,
                 )
     except csv.Error:
+        # Python 3.10 rejects NUL before returning the record for our control scan.
+        # Preserve the diagnostic category without pretending parsing reached EOF.
+        has_nul = "\x00" in lines.last
         state.add(
-            "csv_parse_error",
+            "control_character" if has_nul else "csv_parse_error",
             "error",
-            "Malformed CSV or a field exceeds the Python CSV parser limit.",
+            "Record contains a NUL character; CSV parsing stopped."
+            if has_nul
+            else "Malformed CSV or a field exceeds the Python CSV parser limit.",
             logical_record + 1,
             start,
             max(start, state.physical_lines),

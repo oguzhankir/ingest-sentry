@@ -107,3 +107,32 @@ def test_python310_snapshot_interface_remains_compatible_with_text_io():
         stream.seek(0)
         assert stream.read() == "id,name\r\n1,Ada\r\n"
     assert not underlying.closed
+
+
+def test_python310_nul_rejection_keeps_control_diagnostic(tmp_path, monkeypatch):
+    from ingest_sentry import inspection
+
+    actual_reader = csv.reader
+
+    class LegacyReader:
+        def __init__(self, *args, **kwargs):
+            self.reader = actual_reader(*args, **kwargs)
+
+        @property
+        def line_num(self):
+            return self.reader.line_num
+
+        def __next__(self):
+            row = next(self.reader)
+            if any("\x00" in cell for cell in row):
+                raise csv.Error("line contains NUL")
+            return row
+
+    path = tmp_path / "nul.csv"
+    path.write_bytes(b"id,note\n1,private\x00value\n")
+    monkeypatch.setattr(inspection.csv, "reader", LegacyReader)
+    report = inspect_file(path, encoding="utf-8", delimiter=",")
+    assert not report.ok and not report.complete
+    assert report.issues[0].code == "control_character"
+    assert report.issues[0].line_start == 2
+    assert "private" not in report.issues[0].message
