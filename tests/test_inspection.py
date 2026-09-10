@@ -520,7 +520,7 @@ def test_non_text_or_unknown_encoding_is_rejected(make_file, encoding):
         inspect_file(make_file("id,name\n1,Ada\n"), encoding=encoding)
 
 
-@pytest.mark.parametrize("header", [0, 1, "yes", None])
+@pytest.mark.parametrize("header", [0, 1, "yes"])
 def test_header_requires_a_boolean(make_file, header):
     with pytest.raises(ValueError):
         inspect_file(make_file("id,name\n1,Ada\n"), header=header)

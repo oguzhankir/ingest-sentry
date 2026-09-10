@@ -20,6 +20,10 @@ def check(directory: Path) -> None:
         "ingest_sentry/cli.py",
         "ingest_sentry/inspection.py",
         "ingest_sentry/models.py",
+        "ingest_sentry/contracts.py",
+        "ingest_sentry/errors.py",
+        "ingest_sentry/normalization.py",
+        "ingest_sentry/adapters.py",
         "ingest_sentry/py.typed",
     }
     with zipfile.ZipFile(wheels[0]) as wheel:
@@ -56,6 +60,9 @@ def check(directory: Path) -> None:
                 "README.md",
                 "LICENSE",
                 "pyproject.toml",
+                "action.yml",
+                "scripts/action_runner.py",
+                "examples/vendor.contract.json",
                 "examples/vendor_export.csv",
                 "examples/vendor_export_broken.csv",
             )

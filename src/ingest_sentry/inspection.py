@@ -10,7 +10,8 @@ import os
 import stat
 import unicodedata
 from collections import Counter
-from contextlib import ExitStack
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import BinaryIO, Literal, cast
 
 import bytesense
 
+from .contracts import ContractValidator, ImportContract
 from .models import CsvDialect, EncodingInfo, InspectionReport, Issue
 
 _CHUNK = 65536
@@ -44,6 +46,16 @@ class _State:
     issues: list[Issue] = field(default_factory=list)
     error_count: int = 0
     warning_count: int = 0
+
+    def emit(self, issue: Issue) -> None:
+        self.add(
+            issue.code,
+            issue.severity,
+            issue.message,
+            issue.record,
+            issue.line_start,
+            issue.line_end,
+        )
 
     def add(
         self,
@@ -281,8 +293,9 @@ class _Lines:
         return line
 
 
-def _parse(stream: io.TextIOWrapper, state: _State) -> None:
+def _parse(stream: io.TextIOWrapper, state: _State, contract: ImportContract | None = None) -> None:
     assert state.dialect is not None
+    validator = ContractValidator(contract, state.emit) if contract is not None else None
     lines = _Lines(stream, state)
     reader = csv.reader(lines, delimiter=state.dialect.delimiter, strict=True)
     logical_record = 0
@@ -295,7 +308,9 @@ def _parse(stream: io.TextIOWrapper, state: _State) -> None:
             except StopIteration:
                 state.complete = True
                 break
-            if not row or (reader.line_num == start and not lines.last.strip(" \t\r\n")):
+            if not row or (
+                len(row) == 1 and reader.line_num == start and not lines.last.strip(" \t\r\n")
+            ):
                 continue
             logical_record += 1
             if any(
@@ -312,6 +327,8 @@ def _parse(stream: io.TextIOWrapper, state: _State) -> None:
             if state.columns is None:
                 state.columns = len(row)
                 if state.dialect.header:
+                    if validator is not None:
+                        validator.validate_header(row, logical_record, start, reader.line_num)
                     if any(not name.strip() for name in row):
                         state.add(
                             "blank_header",
@@ -332,6 +349,8 @@ def _parse(stream: io.TextIOWrapper, state: _State) -> None:
                         )
                     continue
             state.records += 1
+            if validator is not None:
+                validator.validate_row(row, logical_record, start, reader.line_num)
             if len(row) != state.columns:
                 state.add(
                     "column_count",
@@ -370,6 +389,8 @@ def _parse(stream: io.TextIOWrapper, state: _State) -> None:
         state.add("empty_file", "error", "Input contains no nonblank CSV records.")
     elif state.complete and state.records == 0:
         state.add("no_data_records", "warning", "Input has a header but no data records.")
+    if state.complete and validator is not None:
+        validator.finish(state.records)
 
 
 def inspect_file(
@@ -377,7 +398,8 @@ def inspect_file(
     *,
     encoding: str | None = None,
     delimiter: str | None = None,
-    header: bool = True,
+    header: bool | None = None,
+    contract: ImportContract | None = None,
     max_bytes: int = 64 * 1024 * 1024,
     max_issues: int = 100,
 ) -> InspectionReport:
@@ -389,9 +411,55 @@ def inspect_file(
     Limits bound the captured file and retained diagnostics, not total process RSS.
     ``record`` in issues counts nonblank logical records including the header.
     """
-    encoding = _validate_options(encoding, delimiter, header, max_bytes, max_issues)
+    with _inspection_session(
+        path,
+        encoding=encoding,
+        delimiter=delimiter,
+        header=header,
+        contract=contract,
+        max_bytes=max_bytes,
+        max_issues=max_issues,
+    ) as (report, _snapshot):
+        return report
+
+
+@contextmanager
+def _inspection_session(
+    path: str | os.PathLike[str],
+    *,
+    encoding: str | None = None,
+    delimiter: str | None = None,
+    header: bool | None = None,
+    contract: ImportContract | None = None,
+    max_bytes: int = 64 * 1024 * 1024,
+    max_issues: int = 100,
+) -> Iterator[tuple[InspectionReport, BinaryIO]]:
+    if contract is not None and not isinstance(contract, ImportContract):
+        raise ValueError("contract must be an ImportContract.")
+    resolved_header = (
+        contract.header if header is None and contract else (True if header is None else header)
+    )
+    encoding = _validate_options(encoding, delimiter, resolved_header, max_bytes, max_issues)
+    if contract is not None:
+        expected_encoding = (
+            codecs.lookup(contract.encoding).name if contract.encoding is not None else None
+        )
+        if encoding is not None and expected_encoding is not None and encoding != expected_encoding:
+            raise ValueError("encoding conflicts with the contract.")
+        if (
+            delimiter is not None
+            and contract.delimiter is not None
+            and delimiter != contract.delimiter
+        ):
+            raise ValueError("delimiter conflicts with the contract.")
+        if resolved_header != contract.header:
+            raise ValueError("header conflicts with the contract.")
+        encoding = encoding or expected_encoding
+        delimiter = delimiter if delimiter is not None else contract.delimiter
     source = Path(path)
-    kind: Literal["csv", "tsv"] = "tsv" if source.suffix.lower() == ".tsv" else "csv"
+    kind: Literal["csv", "tsv"] = (
+        contract.format if contract else ("tsv" if source.suffix.lower() == ".tsv" else "csv")
+    )
     state = _State(
         source.name,
         kind,
@@ -399,48 +467,95 @@ def inspect_file(
         EncodingInfo(encoding, "provided" if encoding else "detected", "unknown", None, 0, False),
     )
     with SpooledTemporaryFile(max_size=_MEMORY_LIMIT, mode="w+b") as snapshot:
-        if not _capture(source, cast(BinaryIO, snapshot), state, max_bytes):
-            return state.report()
-        if state.byte_count == 0:
-            state.complete = True
-            state.add("empty_file", "error", "Input contains no CSV records.")
-            return state.report()
-        if not _detect_encoding(cast(BinaryIO, snapshot), state, encoding):
-            return state.report()
-        assert state.encoding.name is not None
-        # Detach rather than close: the outer context owns and disposes of the snapshot.
-        stream = io.TextIOWrapper(
-            cast(BinaryIO, _SnapshotReader(cast(BinaryIO, snapshot))),
-            encoding=state.encoding.name,
-            errors="strict",
-            newline="",
+        captured = cast(BinaryIO, snapshot)
+        _inspect_captured(
+            source, captured, state, encoding, delimiter, resolved_header, max_bytes, contract
         )
-        selected: str | None
-        try:
-            if delimiter is None:
-                if kind == "tsv":
-                    selected = "\t"
-                else:
-                    sample = stream.read(_SAMPLE_CHARS + 1)
-                    if len(sample) > _SAMPLE_CHARS:
-                        sample = sample[:_SAMPLE_CHARS]
-                        boundary = max(sample.rfind("\n"), sample.rfind("\r"))
-                        if boundary < 0:
-                            state.add(
-                                "dialect_unresolved",
-                                "error",
-                                "No complete sampled line; provide a delimiter.",
-                            )
-                            return state.report()
-                        sample = sample[: boundary + 1]
-                    selected = _infer_delimiter(sample, state)
-                if selected is None:
-                    return state.report()
+        captured.seek(0)
+        yield state.report(), captured
+
+
+def _inspect_captured(
+    source: Path,
+    snapshot: BinaryIO,
+    state: _State,
+    encoding: str | None,
+    delimiter: str | None,
+    header: bool,
+    max_bytes: int,
+    contract: ImportContract | None,
+) -> None:
+    if not _capture(source, snapshot, state, max_bytes):
+        return
+    if state.byte_count == 0:
+        state.complete = True
+        state.add("empty_file", "error", "Input contains no CSV records.")
+        if contract is not None:
+            ContractValidator(contract, state.emit).finish(0)
+        return
+    if not _detect_encoding(snapshot, state, encoding):
+        return
+    assert state.encoding.name is not None
+    stream = io.TextIOWrapper(
+        cast(BinaryIO, _SnapshotReader(snapshot)),
+        encoding=state.encoding.name,
+        errors="strict",
+        newline="",
+    )
+    selected: str | None
+    try:
+        if delimiter is None:
+            if state.format == "tsv":
+                selected = "\t"
             else:
-                selected = delimiter
-            state.dialect = CsvDialect(selected, header, delimiter is None)
-            stream.seek(0)
-            _parse(stream, state)
-        finally:
-            stream.detach().close()
-    return state.report()
+                sample = stream.read(_SAMPLE_CHARS + 1)
+                if len(sample) > _SAMPLE_CHARS:
+                    sample = sample[:_SAMPLE_CHARS]
+                    boundary = max(sample.rfind("\n"), sample.rfind("\r"))
+                    if boundary < 0:
+                        state.add(
+                            "dialect_unresolved",
+                            "error",
+                            "No complete sampled line; provide a delimiter.",
+                        )
+                        return
+                    sample = sample[: boundary + 1]
+                selected = _infer_delimiter(sample, state)
+            if selected is None:
+                return
+        else:
+            selected = delimiter
+        state.dialect = CsvDialect(selected, header, delimiter is None)
+        stream.seek(0)
+        _parse(stream, state, contract)
+    finally:
+        stream.detach().close()
+
+
+def _iter_rows(snapshot: BinaryIO, report: InspectionReport) -> Iterator[list[str]]:
+    """Read validated rows, including the header, without reopening the source."""
+    assert report.ok and report.encoding.name is not None and report.dialect is not None
+    snapshot.seek(0)
+    state = _State(report.source, report.format, 1, report.encoding)
+    stream = io.TextIOWrapper(
+        cast(BinaryIO, _SnapshotReader(snapshot)),
+        encoding=report.encoding.name,
+        errors="strict",
+        newline="",
+    )
+    try:
+        lines = _Lines(stream, state)
+        reader = csv.reader(lines, delimiter=report.dialect.delimiter, strict=True)
+        while True:
+            start = reader.line_num + 1
+            try:
+                row = next(reader)
+            except StopIteration:
+                return
+            if not row or (
+                len(row) == 1 and reader.line_num == start and not lines.last.strip(" \t\r\n")
+            ):
+                continue
+            yield row
+    finally:
+        stream.detach().close()

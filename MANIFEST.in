@@ -1,6 +1,6 @@
-include README.md LICENSE pyproject.toml
+include README.md LICENSE pyproject.toml action.yml
 recursive-include src *.py py.typed
 recursive-include tests *.py
 recursive-include scripts *.py
-recursive-include examples *.csv
+recursive-include examples *.csv *.json
 global-exclude __pycache__ *.py[cod]
