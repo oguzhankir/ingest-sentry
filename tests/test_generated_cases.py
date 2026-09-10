@@ -4,6 +4,7 @@ import csv
 import io
 import os
 import random
+from types import SimpleNamespace
 
 import pytest
 
@@ -93,3 +94,16 @@ def test_fifo_is_rejected_without_blocking_for_a_writer(tmp_path):
     os.mkfifo(path)
     with pytest.raises(ValueError, match="regular file"):
         inspect_file(path)
+
+
+def test_python310_snapshot_interface_remains_compatible_with_text_io():
+    from ingest_sentry.inspection import _SnapshotReader
+
+    underlying = io.BytesIO(b"id,name\r\n1,Ada\r\n")
+    legacy = SimpleNamespace(read=underlying.read, seek=underlying.seek, tell=underlying.tell)
+    assert not hasattr(legacy, "readable")
+    with io.TextIOWrapper(_SnapshotReader(legacy), encoding="utf-8", newline="") as stream:
+        assert stream.readline() == "id,name\r\n"
+        stream.seek(0)
+        assert stream.read() == "id,name\r\n1,Ada\r\n"
+    assert not underlying.closed

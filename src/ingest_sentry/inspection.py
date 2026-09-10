@@ -227,6 +227,36 @@ class _LongLineError(Exception):
     pass
 
 
+class _SnapshotReader(io.BufferedIOBase):
+    """Read-only IO facade for Python 3.10 spools, without forcing a disk rollover.
+
+    SpooledTemporaryFile gained the full BufferedIOBase interface in Python 3.11.
+    This facade borrows the source; the capture context retains ownership.
+    """
+
+    def __init__(self, source: BinaryIO) -> None:
+        super().__init__()
+        self.source = source
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def read(self, size: int | None = -1) -> bytes:
+        return self.source.read(-1 if size is None else size)
+
+    def read1(self, size: int = -1) -> bytes:
+        return self.source.read(_CHUNK if size < 0 else size)
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        return self.source.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self.source.tell()
+
+
 class _Lines:
     def __init__(self, stream: io.TextIOWrapper, state: _State) -> None:
         self.stream = stream
@@ -375,7 +405,10 @@ def inspect_file(
         assert state.encoding.name is not None
         # Detach rather than close: the outer context owns and disposes of the snapshot.
         stream = io.TextIOWrapper(
-            cast(BinaryIO, snapshot), encoding=state.encoding.name, errors="strict", newline=""
+            cast(BinaryIO, _SnapshotReader(cast(BinaryIO, snapshot))),
+            encoding=state.encoding.name,
+            errors="strict",
+            newline="",
         )
         selected: str | None
         try:
@@ -404,5 +437,5 @@ def inspect_file(
             stream.seek(0)
             _parse(stream, state)
         finally:
-            stream.detach()
+            stream.detach().close()
     return state.report()
