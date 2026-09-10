@@ -1,0 +1,76 @@
+name: Ingest Sentry
+description: Inspect a local CSV or TSV import and enforce its contract without uploading data.
+author: Oğuzhan Kır
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  path:
+    description: Single regular input file, relative to the checked-out workspace.
+    required: true
+  contract:
+    description: Optional local JSON contract, relative to the checked-out workspace.
+    required: false
+    default: ''
+  encoding:
+    description: Optional known text encoding; otherwise bytesense detects it.
+    required: false
+    default: ''
+  delimiter:
+    description: Optional delimiter character; use \t for a tab.
+    required: false
+    default: ''
+  no-header:
+    description: Treat the first record as data instead of a header.
+    required: false
+    default: 'false'
+  max-bytes:
+    description: Maximum input snapshot size in bytes.
+    required: false
+    default: '67108864'
+  max-issues:
+    description: Maximum retained issue details; total counts continue.
+    required: false
+    default: '100'
+  fail-on-warning:
+    description: Fail the action when inspection emits a warning.
+    required: false
+    default: 'false'
+
+outputs:
+  report-path:
+    description: Private JSON report in a randomized runner temporary directory.
+    value: ${{ steps.inspect.outputs.report-path }}
+  ok:
+    description: Whether the input passes inspection and the warning policy.
+    value: ${{ steps.inspect.outputs.ok }}
+  error-count:
+    description: Number of reported errors.
+    value: ${{ steps.inspect.outputs.error-count }}
+  warning-count:
+    description: Number of reported warnings.
+    value: ${{ steps.inspect.outputs.warning-count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Inspect the local import
+      id: inspect
+      shell: bash
+      env:
+        INGEST_SENTRY_ACTION_PATH: ${{ github.action_path }}
+        INGEST_SENTRY_INPUT_PATH: ${{ inputs.path }}
+        INGEST_SENTRY_INPUT_CONTRACT: ${{ inputs.contract }}
+        INGEST_SENTRY_INPUT_ENCODING: ${{ inputs.encoding }}
+        INGEST_SENTRY_INPUT_DELIMITER: ${{ inputs.delimiter }}
+        INGEST_SENTRY_INPUT_NO_HEADER: ${{ inputs.no-header }}
+        INGEST_SENTRY_INPUT_MAX_BYTES: ${{ inputs.max-bytes }}
+        INGEST_SENTRY_INPUT_MAX_ISSUES: ${{ inputs.max-issues }}
+        INGEST_SENTRY_INPUT_FAIL_ON_WARNING: ${{ inputs.fail-on-warning }}
+      run: |
+        python -I "$INGEST_SENTRY_ACTION_PATH/scripts/action_runner.py"

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "format": "csv",
+  "encoding": "utf-8",
+  "delimiter": ";",
+  "header": true,
+  "min_records": 1,
+  "columns": [
+    {"name": "id", "type": "integer"},
+    {"name": "description", "type": "string"},
+    {"name": "amount", "type": "number"}
+  ]
+}
